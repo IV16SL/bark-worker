@@ -39,6 +39,19 @@ Bark-Worker is a [Bark-Server](https://github.com/Finb/bark-server) implenmentio
 - Path based parameters resolve
 - Easy to deploy, Cheap to use and Convenient to manage
 
+## Differences from [bark-server](https://github.com/Finb/bark-server)
+
+This is a port of bark-server to Cloudflare Workers rather than a drop-in replacement. The public APIs stay compatible, with the following differences:
+
+- **Platform**: runs on Cloudflare Workers with D1 (recommended) or KV storage instead of a self-hosted Go server — no Docker or server maintenance.
+- **APNs auth token**: the provider JWT is generated with WebCrypto and cached in D1 for 50 minutes (Apple's limit is 60 minutes), plus an isolate-level memory cache; upstream keeps an in-memory HTTP/2 client pool.
+- **MCP**: reimplemented JSON-RPC with sessions in D1 (1-hour sliding window, 24-hour absolute expiry); upstream uses `mcp-go` with a 10-minute idle TTL and in-memory sessions.
+- **Batch push**: a failing device never fails the whole request; per-device results are returned, same as upstream.
+- **Parameter priority**: same as upstream — request body < query string < URL path, for both V1 and V2 APIs.
+- **Config**: worker-specific variables `ALLOW_NEW_DEVICE`, `ALLOW_QUERY_NUMS`, `ROOT_PATH` (subpath deployment) and a single `BASIC_AUTH` value, instead of upstream's `BARK_SERVER_*` variables and user+password basic auth.
+- **Not supported**: `multipart/form-data` push bodies (upstream V1 accepts them); `GET /register/:device_key` existence check; upstream's `BARK_SERVER_MAX_BATCH_PUSH_COUNT` (no batch limit here). `register` only reads query parameters.
+- **KV version**: no MCP support (storage quota); `info` device count is capped by KV `list` pagination (1000 keys).
+
 ## Setup
 
 > [!NOTE]
