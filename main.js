@@ -7,15 +7,27 @@ export default {
 async function handleRequest(request, env, ctx) {
     const allowNewDevice = env.ALLOW_NEW_DEVICE !== undefined ? (env.ALLOW_NEW_DEVICE === 'false' ? false : Boolean(env.ALLOW_NEW_DEVICE)) : true
     const allowQueryNums = env.ALLOW_QUERY_NUMS !== undefined ? (env.ALLOW_QUERY_NUMS === 'false' ? false : Boolean(env.ALLOW_QUERY_NUMS)) : true
-    const rootPath = env.ROOT_PATH || '/'
+    let rootPrefix = env.ROOT_PATH || '/'
+    while (rootPrefix.length > 1 && rootPrefix.endsWith('/')) {
+        rootPrefix = rootPrefix.slice(0, -1)
+    }
+    if (rootPrefix === '/') {
+        rootPrefix = ''
+    }
     const basicAuth = env.BASIC_AUTH
 
     const db = new Database(env)
-    ctx.waitUntil(db.cleanupExpiredSessions())
+    // Session cleanup is a D1 write; run it probabilistically instead of on every request
+    if (Math.random() < 0.01) {
+        ctx.waitUntil(db.cleanupExpiredSessions())
+    }
 
     const { searchParams, pathname } = new URL(request.url)
     const handler = new Handler(db, { allowNewDevice, allowQueryNums })
-    const realPathname = pathname.replace((new RegExp('^' + rootPath.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&'))), '/')
+    // boundary-aware prefix strip: '/api' must not match '/apiary/...' (same as bark-server's route group)
+    const realPathname = rootPrefix
+        ? ((pathname === rootPrefix || pathname.startsWith(rootPrefix + '/')) ? (pathname.slice(rootPrefix.length) || '/') : pathname)
+        : pathname
 
     switch (realPathname) {
         case '/register': {
@@ -73,32 +85,53 @@ async function handleRequest(request, env, ctx) {
                 let requestBody = {}
 
                 try {
-                    if (contentType && contentType.includes('application/json')) {
+                    if (contentType && (contentType.includes('application/json') || contentType.includes('+json'))) {
                         requestBody = await request.json()
 
                         requestBody = Object.keys(requestBody).reduce((obj, key) => {
                             obj[key.toLowerCase()] = requestBody[key]
                             return obj
                         }, {})
+
+                        // query args: medium priority (same as bark-server V2)
+                        searchParams.forEach((value, key) => { requestBody[key.toLowerCase()] = value })
+
+                        // url path params: highest priority (same as bark-server V2)
+                        const jsonPathParams = decodedPathParams(pathParts)
+                        if (jsonPathParams === null) {
+                            return segmentLimitResponse(request, realPathname)
+                        }
+                        Object.assign(requestBody, jsonPathParams)
                     } else if (contentType && contentType.includes('application/x-www-form-urlencoded')) {
+                        // query args: medium priority (same as bark-server V1)
+                        searchParams.forEach((value, key) => { requestBody[key.toLowerCase()] = value })
+
                         const formData = await request.formData()
                         formData.forEach((value, key) => { requestBody[key.toLowerCase()] = value })
 
+                        // url path params: highest priority (same as bark-server V1)
+                        // (kept percent-encoded here; the decode block below handles them once)
+                        const formPathParams = rawPathParams(pathParts)
+                        if (formPathParams === null) {
+                            return segmentLimitResponse(request, realPathname)
+                        }
+                        Object.assign(requestBody, formPathParams)
+
                         try {
                             if (requestBody.title) {
-                                requestBody.title = decodeURIComponent(requestBody.title.replaceAll('\+', '%20'))
+                                requestBody.title = decodeURIComponent(requestBody.title.replaceAll('+', '%20'))
                             }
 
                             if (requestBody.subtitle) {
-                                requestBody.subtitle = decodeURIComponent(requestBody.subtitle.replaceAll('\+', '%20'))
+                                requestBody.subtitle = decodeURIComponent(requestBody.subtitle.replaceAll('+', '%20'))
                             }
 
                             if (requestBody.body) {
-                                requestBody.body = decodeURIComponent(requestBody.body.replaceAll('\+', '%20'))
+                                requestBody.body = decodeURIComponent(requestBody.body.replaceAll('+', '%20'))
                             }
 
                             if (requestBody.markdown) {
-                                requestBody.markdown = decodeURIComponent(requestBody.markdown.replaceAll('\+', '%20'))
+                                requestBody.markdown = decodeURIComponent(requestBody.markdown.replaceAll('+', '%20'))
                             }
                         } catch (error) {
                             return new Response(JSON.stringify({
@@ -115,43 +148,27 @@ async function handleRequest(request, env, ctx) {
                     } else {
                         searchParams.forEach((value, key) => { requestBody[key.toLowerCase()] = value })
 
-                        if (pathParts.length === 3) {
-                            requestBody.body = pathParts[2]
-                        } else if (pathParts.length === 4) {
-                            requestBody.title = pathParts[2]
-                            requestBody.body = pathParts[3]
-                        } else if (pathParts.length === 5) {
-                            requestBody.title = pathParts[2]
-                            requestBody.subtitle = pathParts[3]
-                            requestBody.body = pathParts[4]
-                        } else if (pathParts.length > 5) {
-                            return new Response(JSON.stringify({
-                                'code': 404,
-                                'message': `Cannot ${request.method} ${realPathname}`,
-                                'timestamp': util.getTimestamp(),
-                            }), {
-                                status: 404,
-                                headers: {
-                                    'content-type': 'application/json',
-                                }
-                            })
+                        const getPathParams = rawPathParams(pathParts)
+                        if (getPathParams === null) {
+                            return segmentLimitResponse(request, realPathname)
                         }
+                        Object.assign(requestBody, getPathParams)
 
                         try {
                             if (requestBody.title) {
-                                requestBody.title = decodeURIComponent(requestBody.title.replaceAll('\+', '%20'))
+                                requestBody.title = decodeURIComponent(requestBody.title.replaceAll('+', '%20'))
                             }
 
                             if (requestBody.subtitle) {
-                                requestBody.subtitle = decodeURIComponent(requestBody.subtitle.replaceAll('\+', '%20'))
+                                requestBody.subtitle = decodeURIComponent(requestBody.subtitle.replaceAll('+', '%20'))
                             }
 
                             if (requestBody.body) {
-                                requestBody.body = decodeURIComponent(requestBody.body.replaceAll('\+', '%20'))
+                                requestBody.body = decodeURIComponent(requestBody.body.replaceAll('+', '%20'))
                             }
 
                             if (requestBody.markdown) {
-                                requestBody.markdown = decodeURIComponent(requestBody.markdown.replaceAll('\+', '%20'))
+                                requestBody.markdown = decodeURIComponent(requestBody.markdown.replaceAll('+', '%20'))
                             }
                         } catch (error) {
                             return new Response(JSON.stringify({
@@ -168,10 +185,16 @@ async function handleRequest(request, env, ctx) {
                     }
 
                     if (requestBody.device_keys && typeof requestBody.device_keys === 'string') {
-                        if (requestBody.device_keys.startsWith('[') || requestBody.device_keys.endsWith(']')) {
-                            requestBody.device_keys = JSON.parse(requestBody.device_keys)
+                        const deviceKeysRaw = requestBody.device_keys.trim()
+
+                        if (deviceKeysRaw.startsWith('[') && deviceKeysRaw.endsWith(']')) {
+                            try {
+                                requestBody.device_keys = JSON.parse(deviceKeysRaw)
+                            } catch {
+                                requestBody.device_keys = [requestBody.device_keys]
+                            }
                         } else {
-                            requestBody.device_keys = (decodeURIComponent(requestBody.device_keys).trim()).split(',').map(item => item.replace(/['"]/g, '').trim())
+                            requestBody.device_keys = decodeURIComponent(deviceKeysRaw).split(',').map(item => item.replace(/['"]/g, '').trim())
                         }
 
                         if (typeof requestBody.device_keys === 'string') {
@@ -196,20 +219,30 @@ async function handleRequest(request, env, ctx) {
                         'code': 200,
                         'message': 'success',
                         'data': await Promise.all(requestBody.device_keys.map(async (device_key) => {
-                            if (!device_key) {
+                            try {
+                                if (!device_key) {
+                                    return {
+                                        code: 400,
+                                        message: 'device key is empty',
+                                        device_key: device_key,
+                                    }
+                                }
+
+                                const response = await handler.push({ ...requestBody, device_key })
+                                const responseBody = await response.json()
                                 return {
-                                    code: 400,
-                                    message: 'device key is empty',
+                                    code: response.status,
+                                    message: responseBody.message,
                                     device_key: device_key,
                                 }
-                            }
-
-                            const response = await handler.push({ ...requestBody, device_key })
-                            const responseBody = await response.json()
-                            return {
-                                code: response.status,
-                                message: responseBody.message,
-                                device_key: device_key,
+                            } catch (err) {
+                                // isolate per-device failures so one bad push
+                                // doesn't fail the whole batch (same as bark-server)
+                                return {
+                                    code: 500,
+                                    message: `push failed: ${err}`,
+                                    device_key: device_key,
+                                }
                             }
                         })),
                         'timestamp': util.getTimestamp(),
@@ -264,6 +297,53 @@ async function handleRequest(request, env, ctx) {
     }
 }
 
+// Decode one URL path segment ('+' counts as space, then percent-decoding)
+function decodePathSegment(value) {
+    return decodeURIComponent(String(value).replaceAll('+', '%20'))
+}
+
+// Raw (still percent-encoded) path params for
+// /:device_key/[:body | :title/:body | :title/:subtitle/:body]
+// Returns null when there are too many segments.
+function rawPathParams(pathParts) {
+    if (pathParts.length === 3) {
+        return { body: pathParts[2] }
+    } else if (pathParts.length === 4) {
+        return { title: pathParts[2], body: pathParts[3] }
+    } else if (pathParts.length === 5) {
+        return { title: pathParts[2], subtitle: pathParts[3], body: pathParts[4] }
+    } else if (pathParts.length > 5) {
+        return null
+    }
+    return {}
+}
+
+// Decoded path params, for request types whose other params are not decoded afterwards (JSON)
+function decodedPathParams(pathParts) {
+    const raw = rawPathParams(pathParts)
+    if (raw === null) {
+        return null
+    }
+    const decoded = {}
+    for (const key of Object.keys(raw)) {
+        decoded[key] = decodePathSegment(raw[key])
+    }
+    return decoded
+}
+
+function segmentLimitResponse(request, realPathname) {
+    return new Response(JSON.stringify({
+        'code': 404,
+        'message': `Cannot ${request.method} ${realPathname}`,
+        'timestamp': util.getTimestamp(),
+    }), {
+        status: 404,
+        headers: {
+            'content-type': 'application/json',
+        }
+    })
+}
+
 class Handler {
     constructor(db, options) {
         this.version = 'v2.3.3'
@@ -276,6 +356,9 @@ class Handler {
         this.register = async (parameters) => {
             const deviceToken = parameters.get('devicetoken')
             let key = parameters.get('key')
+            if (key) {
+                key = key.replace(/[^a-zA-Z0-9]/g, '')
+            }
 
             if (!deviceToken) {
                 return new Response(JSON.stringify({
@@ -303,21 +386,24 @@ class Handler {
                 })
             }
 
-            if (!(key && await db.deviceTokenByKey(key))) {
-                if (this.allowNewDevice) {
-                    key = await util.newShortUUID()
-                } else {
-                    return new Response(JSON.stringify({
-                        'code': 500,
-                        'message': 'device registration failed: register disabled',
-                    }), {
-                        status: 500,
-                        headers: {
-                            'content-type': 'application/json',
-                        }
-                    })
-                }
+            const keyExists = key ? (await db.deviceTokenByKey(key)) !== undefined : false
+
+            if (!keyExists && !this.allowNewDevice) {
+                return new Response(JSON.stringify({
+                    'code': 500,
+                    'message': 'device registration failed: register disabled',
+                }), {
+                    status: 500,
+                    headers: {
+                        'content-type': 'application/json',
+                    }
+                })
             }
+
+            if (!key) {
+                key = await util.newShortUUID()
+            }
+            // a provided-but-unknown key is kept as-is (upsert, same as bark-server)
 
             await db.saveDeviceTokenByKey(key, deviceToken)
 
@@ -361,8 +447,9 @@ class Handler {
         }
 
         this.info = async (parameters) => {
+            let devices
             if (this.allowQueryNums) {
-                this.devices = await db.countAll()
+                devices = await db.countAll()
             }
 
             return new Response(JSON.stringify({
@@ -370,7 +457,7 @@ class Handler {
                 'build': this.build,
                 'arch': this.arch,
                 'commit': this.commit,
-                'devices': this.devices,
+                'devices': devices,
             }), {
                 status: 200,
                 headers: {
@@ -421,24 +508,29 @@ class Handler {
                 sound = '1107'
             }
 
-            const group = parameters.group || undefined
-            const call = parameters.call || undefined
-            const isArchive = parameters.isarchive || undefined
-            const icon = parameters.icon || undefined
-            const ciphertext = parameters.ciphertext || undefined
-            const level = parameters.level || undefined
-            const volume = parameters.volume || undefined
-            const url = parameters.url || undefined
-            const image = parameters.image || undefined
-            const copy = parameters.copy || undefined
-            const badge = parameters.badge || undefined
-            const autoCopy = parameters.autocopy || undefined
-            const action = parameters.action || undefined
-            const iv = parameters.iv || undefined
-            const id = parameters.id || undefined
-            const _delete = parameters.delete || undefined
-            const markdown = parameters.markdown || undefined
-            const ttl = parameters.ttl || undefined
+            // bark-server stringifies every ext param; numbers from a JSON body
+            // (badge, volume, ttl, ...) must not reach the payload as JSON numbers
+            const strParam = (v) => v ? String(v) : undefined
+
+            const group = strParam(parameters.group)
+            const call = strParam(parameters.call)
+            const isArchive = strParam(parameters.isarchive)
+            const icon = strParam(parameters.icon)
+            const ciphertext = strParam(parameters.ciphertext)
+            const level = strParam(parameters.level)
+            const volume = strParam(parameters.volume)
+            const url = strParam(parameters.url)
+            const image = strParam(parameters.image)
+            const copy = strParam(parameters.copy)
+            const badge = strParam(parameters.badge)
+            const autoCopy = strParam(parameters.autocopy)
+            const action = strParam(parameters.action)
+            const iv = strParam(parameters.iv)
+            const id = strParam(parameters.id)
+            // same as bark-server: only an explicit "1" is a delete push ("0" must not delete)
+            const _delete = (parameters.delete === '1' || parameters.delete === 1) ? '1' : undefined
+            const markdown = strParam(parameters.markdown)
+            const ttl = strParam(parameters.ttl)
 
             // https://developer.apple.com/documentation/usernotifications/generating-a-remote-notification
             const aps = {
@@ -851,6 +943,9 @@ class Handler {
     }
 }
 
+// APNs provider-token cache, scoped to the worker isolate
+const apnsTokenCache = { token: null, time: 0 }
+
 class APNs {
     constructor(db) {
         const generateAuthToken = async () => {
@@ -886,14 +981,26 @@ class APNs {
         }
 
         const getAuthToken = async () => {
+            // Isolate-scoped cache: isolates are reused across requests, so the
+            // D1 read is skipped for the vast majority of pushes. D1 stays the
+            // cross-isolate fallback. 3000s matches Apple's 60-minute token limit.
+            const now = util.getTimestamp()
+            if (apnsTokenCache.token && now - apnsTokenCache.time <= 3000) {
+                return apnsTokenCache.token
+            }
+
             let authToken = await db.authorizationToken()
 
             if (authToken) {
-                return await authToken
+                apnsTokenCache.token = authToken
+                apnsTokenCache.time = now
+                return authToken
             }
 
             authToken = await generateAuthToken()
             await db.saveAuthorizationToken(authToken, util.getTimestamp())
+            apnsTokenCache.token = authToken
+            apnsTokenCache.time = now
 
             return authToken
         }
@@ -945,9 +1052,12 @@ class Database {
         }
 
         this.saveDeviceTokenByKey = async (key, token) => {
+            // sanitize the key exactly like deviceTokenByKey() does,
+            // so every saved key stays findable afterwards
+            const device_key = (key || '').replace(/[^a-zA-Z0-9]/g, '')
             const device_token = (token || '').replace(/[^a-z0-9]/g, '') || ''
             const query = 'INSERT INTO `devices` (`key`, `token`) VALUES (?, ?) ON CONFLICT(`key`) DO UPDATE SET `token` = EXCLUDED.`token`'
-            const result = await db.prepare(query).bind(key, device_token).run()
+            const result = await db.prepare(query).bind(device_key, device_token).run()
 
             return result
         }
