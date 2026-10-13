@@ -39,6 +39,19 @@ Bark-Worker 是一个 [Bark-Server](https://github.com/Finb/bark-server) 在 Clo
 - 基于路径的参数解析
 - 便于部署, 低成本且方便管理
 
+## 与 [bark-server](https://github.com/Finb/bark-server) 的差异
+
+本项目是 bark-server 在 Cloudflare Workers 上的移植, 而非原样替换. 公开 API 保持兼容, 差异如下:
+
+- **运行平台**: 跑在 Cloudflare Workers 上, 用 D1 (推荐) 或 KV 存数据, 不需要自建 Go 服务 / Docker 维护.
+- **APNs 认证 token**: 用 WebCrypto 生成 provider JWT, 缓存在 D1 里 50 分钟 (Apple 上限 60 分钟), 外加 isolate 级内存缓存; 上游是常驻内存的 HTTP/2 连接池.
+- **MCP**: 自研 JSON-RPC 实现, 会话存 D1 (1 小时滑动过期、24 小时绝对过期); 上游用 `mcp-go`, 10 分钟 idle TTL, 会话在内存里.
+- **批量推送**: 单个设备失败不会拖垮整批请求, 返回逐设备结果, 与上游一致.
+- **参数优先级**: 与上游一致, V1/V2 都是 请求体 < query 参数 < URL 路径.
+- **配置项**: Worker 专属变量 `ALLOW_NEW_DEVICE`、`ALLOW_QUERY_NUMS`、`ROOT_PATH` (子路径部署) 和单个 `BASIC_AUTH` 值; 上游是 `BARK_SERVER_*` 系列变量和用户名+密码的 Basic Auth.
+- **不支持**: `multipart/form-data` 的推送请求体 (上游 V1 支持); `GET /register/:device_key` 存活检查接口; 上游的 `BARK_SERVER_MAX_BATCH_PUSH_COUNT` (这里不限制批量数量). `register` 只认 query 参数.
+- **KV 版本**: 无 MCP 支持 (配额限制); `info` 的设备数受 KV `list` 分页限制 (最多 1000).
+
 ## 部署
 
 > [!NOTE]
